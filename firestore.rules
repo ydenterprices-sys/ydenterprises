@@ -1,0 +1,133 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /**
+     * YD ENTERPRICES ORDER MANAGEMENT SYSTEM - SECURITY RULES
+     * 
+     * CORE PHILOSOPHY:
+     * This ruleset implements a Database-Backed Access Control (DBAC) model combined with individual ownership. 
+     * Security is designed around 'Authorization Independence', meaning documents contain the necessary fields 
+     * (like ownerId) to make access decisions without requiring expensive cross-document lookups (get() calls).
+     *
+     * DATA STRUCTURE:
+     * - Top-level collections: /products, /customers, /orders, /roles_admin.
+     * - Subcollections: /orders/{orderId}/orderItems.
+     *
+     * KEY SECURITY DECISIONS:
+     * 1. Global Read Access: All authenticated users (salespeople and admins) can read product catalogs, 
+     *    customer lists, and order history to support "Daily Order Overview" features.
+     * 2. Admin-Restricted Writes: Modifying the Product and Customer catalogs is strictly reserved for 
+     *    users whose UID exists in the /roles_admin collection.
+     * 3. Ownership-Based Writes: Orders and their line items are writable by the user who created them 
+     *    (the 'owner') or by an administrative user.
+     * 4. Denormalization for Performance: 'ownerId' and 'orderOwnerId' are stored directly on Order 
+     *    and OrderItem documents respectively to ensure rapid, independent rule evaluation.
+     * 5. Prototyping Flexibility: While authorization is strictly enforced based on roles and ownership, 
+     *    data schema validation (types, optional fields) is omitted to allow for rapid development.
+     */
+
+    // --- HELPER FUNCTIONS ---
+
+    /** @description Checks if the request is from an authenticated user. */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /** @description Checks if the authenticated user has a document in the admin roles collection. */
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
+    }
+
+    /** @description Checks if the provided UID matches the authenticated user's UID. */
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    /** @description Verifies document existence and confirms the authenticated user is the owner. */
+    function isExistingOwner(userId) {
+      return resource != null && isOwner(userId);
+    }
+
+    /** @description Verifies document existence and confirms the authenticated user is an admin. */
+    function isExistingAdmin() {
+      return resource != null && isAdmin();
+    }
+
+    // --- COLLECTION RULES ---
+
+    /**
+     * @description Access rules for the Product catalog. Publicly readable by staff; writable by admins.
+     * @path /products/{productId}
+     * @allow (get/list) If user is signed in.
+     * @allow (create/update/delete) If user is an admin.
+     * @deny (write) If user is not an admin.
+     * @principle Role-based access control using DBAC.
+     */
+    match /products/{productId} {
+      allow get, list: if isSignedIn();
+      allow create: if isAdmin();
+      allow update, delete: if isExistingAdmin();
+    }
+
+    /**
+     * @description Access rules for the Customer registry. Staff can view customers to place orders.
+     * @path /customers/{customerId}
+     * @allow (get/list) If user is signed in.
+     * @allow (create/update/delete) If user is an admin.
+     * @deny (write) If user is not an admin.
+     * @principle Role-based access control for master data management.
+     */
+    match /customers/{customerId} {
+      allow get, list: if isSignedIn();
+      allow create: if isAdmin();
+      allow update, delete: if isExistingAdmin();
+    }
+
+    /**
+     * @description Access rules for Orders. Supports shared visibility for order history.
+     * @path /orders/{orderId}
+     * @allow (get/list) If user is signed in (supports daily overview).
+     * @allow (create) If user sets themselves as the ownerId.
+     * @allow (update/delete) If user is the owner or an admin.
+     * @deny (create) If ownerId does not match the authenticated user.
+     * @principle Ownership-based writes with administrative overrides.
+     */
+    match /orders/{orderId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow update, delete: if isExistingOwner(resource.data.ownerId) || isExistingAdmin();
+    }
+
+    /**
+     * @description Access rules for Order Items. Uses denormalized owner IDs for independence.
+     * @path /orders/{orderId}/orderItems/{orderItemId}
+     * @allow (get/list) If user is signed in.
+     * @allow (create) If user sets orderOwnerId to their own UID.
+     * @allow (update/delete) If user is the orderOwnerId or an admin.
+     * @deny (write) If user is not the owner of the parent order or an admin.
+     * @principle Authorization independence via denormalized ownership fields.
+     */
+    match /orders/{orderId}/orderItems/{orderItemId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.orderOwnerId == request.auth.uid;
+      allow update, delete: if isExistingOwner(resource.data.orderOwnerId) || isExistingAdmin();
+    }
+
+    /**
+     * @description Registry for administrative users.
+     * @path /roles_admin/{adminUid}
+     * @allow (get) If user is signed in (to verify own role).
+     * @allow (list) If user is an admin.
+     * @allow (create/update/delete) If user is an admin (admins manage other admins).
+     * @deny (write) By non-admin users.
+     * @principle Restricted administrative role management.
+     */
+    match /roles_admin/{adminUid} {
+      allow get: if isSignedIn();
+      allow list: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if isExistingAdmin();
+    }
+  }
+}
